@@ -6,7 +6,7 @@ This repository implements **DMLR** (Dynamic Multimodal Interleaving Latent Reas
 
 *Comparison between DMLR and two reasoning paradigms. (A) Text-only reasoning: relies solely on explicit CoT, often causing visual grounding errors and redundant steps. (B) Think-with-Image reasoning: depends on external perception tools, leading to unstable tool calls and extra overhead. (C) DMLR (ours): refines latent think tokens in the latent space through confidence-guided optimization and dynamically injects visual information, achieving self-improving reasoning without additional training while maintaining high efficiency.*
 
-### Setup
+## Setup
 
 1. Clone the repository:
 ```bash
