@@ -181,9 +181,13 @@ DMLR/
 If you use this code in your research, please cite:
 
 ```bibtex
-@article{dmlr2025,
-  title={Reasoning Within the Mind: Dynamic Multimodal Interleaving in Latent Space},
-  author={Chengzhi Liu and Yuzhe Yang and Yue Fan and Qingyu Wei and Sheng Liu and Xin Eric Wang},
-  year={2025}
+@misc{liu2025reasoningminddynamicmultimodal,
+      title={Reasoning Within the Mind: Dynamic Multimodal Interleaving in Latent Space}, 
+      author={Chengzhi Liu and Yuzhe Yang and Yue Fan and Qingyue Wei and Sheng Liu and Xin Eric Wang},
+      year={2025},
+      eprint={2512.12623},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2512.12623}, 
 }
 ```
