@@ -1,5 +1,7 @@
 # Reasoning Within the Mind: Dynamic Multimodal Interleaving in Latent Space
 
+[![arXiv](https://img.shields.io/badge/arXiv-2512.12623-b31b1b.svg)](https://arxiv.org/abs/2512.12623) [![Project Page](https://img.shields.io/badge/Project-Page-blue.svg)](https://mllm-dmlr.github.io/)
+
 This repository implements **DMLR** (Dynamic Multimodal Interleaving Latent Reasoning), a method for improving vision-language model reasoning through latent space optimization. The system uses reinforcement learning to optimize "thought tokens" that enhance the model's reasoning capabilities on multimodal tasks.
 
 ![DMLR Framework](asset/dmlr.png)
