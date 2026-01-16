@@ -312,6 +312,7 @@ def get_confidence(
     thought_idx,
     thought_hidden_states,
     k=10,
+    thought_positions=None,
 ):
     """
     Calculate confidence score based on top-k probabilities
@@ -319,22 +320,43 @@ def get_confidence(
     Args:
         model: VL model
         inputs: input dict with inputs_embeds
-        thought_idx: [start_idx, end_idx] of thought tokens
-        thought_hidden_states: hidden states of thought tokens
+        thought_idx: [start_idx, end_idx] of thought tokens (used if thought_positions is None)
+        thought_hidden_states: hidden states of thought tokens [num_thought_tokens, hidden_size]
         k: top-k for confidence calculation
+        thought_positions: list of actual positions of thought tokens in the sequence (if non-contiguous)
     
     Returns:
         confidence score (higher is better)
     """
-    inputs['inputs_embeds'][0, thought_idx[0]:thought_idx[1]] = thought_hidden_states
-    logits = model(**inputs, return_dict=True)['logits'][0]
-    probs = torch.softmax(logits, dim=-1)
-    confidence = 0.0
-    for idx in range(thought_idx[0], thought_idx[1] + 1):
-        topk = torch.topk(probs[idx], k=k, largest=True)[0]
-        confidence -= torch.sum(torch.log(topk + 1e-10)) / k
-    num_tokens = thought_idx[1] - thought_idx[0] + 1
-    return confidence / num_tokens
+    # If thought_positions is provided, use it (for non-contiguous thought tokens after visual insertion)
+    # Otherwise, assume thought tokens are contiguous at thought_idx
+    if thought_positions is not None:
+        # Replace thought tokens at their actual positions
+        for i, pos in enumerate(thought_positions):
+            inputs['inputs_embeds'][0, pos] = thought_hidden_states[i]
+        # Calculate reward on these positions
+        logits = model(**inputs, return_dict=True)['logits'][0]
+        probs = torch.softmax(logits, dim=-1)
+        confidence = 0.0
+        for pos in thought_positions:
+            # logits[pos] predicts the next token after position pos
+            topk = torch.topk(probs[pos], k=k, largest=True)[0]
+            confidence -= torch.sum(torch.log(topk + 1e-10)) / k
+        num_tokens = len(thought_positions)
+    else:
+        # Original behavior: contiguous thought tokens
+        inputs['inputs_embeds'][0, thought_idx[0]:thought_idx[1]] = thought_hidden_states
+        logits = model(**inputs, return_dict=True)['logits'][0]
+        probs = torch.softmax(logits, dim=-1)
+        confidence = 0.0
+        # Note: logits[i] predicts token at position i+1
+        # So we calculate confidence for predictions at each thought token position
+        for idx in range(thought_idx[0], thought_idx[1]):
+            topk = torch.topk(probs[idx], k=k, largest=True)[0]
+            confidence -= torch.sum(torch.log(topk + 1e-10)) / k
+        num_tokens = thought_idx[1] - thought_idx[0]
+    
+    return confidence / num_tokens if num_tokens > 0 else 0.0
 
 
 def _resolve_image_grid_tuple(image_grid_thw) -> Optional[Tuple[int, int, int]]:
@@ -528,6 +550,12 @@ def generate_vl(
         current_patch_budget = max(1, current_patch_budget)
 
     patch_increment = max(0, patch_increment)
+    
+    # Initialize variables for optimized patches
+    optimized_patch_embeds = None  # Will store patch embeddings as Parameter when patches are selected
+    total_optimized_tokens = num_thought_tokens  # Start with just thought tokens
+    optimized_start_idx = thought_idx[0]  # Start position of optimized block
+    patch_structure = {}  # Maps think_offset -> number of patches inserted after it
 
     # =========================
     # RL LOOP
@@ -539,10 +567,22 @@ def generate_vl(
             optimizer.zero_grad()
 
         # 3.1 exploration noise
-        epsilon = torch.normal(mean=0.0, std=sigma, size=thought_hidden_states.shape).to(embed_device)
-
-        # 3.2 candidate embedding
-        candidate_latent = thought_hidden_states.detach() + epsilon
+        # If patches are being optimized, use combined optimization block
+        if optimized_patch_embeds is not None:
+            # Combined optimization: thought tokens + patches
+            combined_embeds = torch.cat([
+                thought_hidden_states,
+                optimized_patch_embeds
+            ], dim=0)
+            epsilon = torch.normal(mean=0.0, std=sigma, size=combined_embeds.shape).to(embed_device)
+            candidate_combined = combined_embeds.detach() + epsilon
+            candidate_latent = candidate_combined[:num_thought_tokens]
+            candidate_patches = candidate_combined[num_thought_tokens:]
+        else:
+            # Only thought tokens
+            epsilon = torch.normal(mean=0.0, std=sigma, size=thought_hidden_states.shape).to(embed_device)
+            candidate_latent = thought_hidden_states.detach() + epsilon
+            candidate_patches = None
 
         # 3.3 write candidate latents into copy
         inputs_embeds_step = inputs_embeds.clone()
@@ -643,6 +683,9 @@ def generate_vl(
                     picked_image_embeds = inputs_embeds_step[0, abs_topk, :]
 
                 all_selected_tokens[think_offset] = picked_image_embeds
+                
+                # Track patch structure for optimization
+                patch_structure[think_offset] = len(chosen_abs_ids)
 
                 if verbose >= 1:
                     rel_positions = (abs_topk - image_start).cpu().tolist()
@@ -654,22 +697,72 @@ def generate_vl(
             # Build new embeddings: interleave thought tokens with their matched visual tokens (only at stride positions)
             # Format: [prefix] [think_0] [visual_0] [think_1] [think_2] [visual_2] ... [suffix]
             embed_parts = [inputs_embeds_step[:, :thought_idx[0], :]]  # prefix before first thought token
-
+            
+            # Initialize optimized patches if this is the first time selecting patches
+            if optimized_patch_embeds is None and not disable_conf_reward and use_auto_grad:
+                # Collect all patches to be inserted
+                all_patches_list = []
+                for think_offset in range(num_thought):
+                    if think_offset in all_selected_tokens:
+                        all_patches_list.append(all_selected_tokens[think_offset])
+                if all_patches_list:
+                    # Initialize patch embeddings as optimizable parameters
+                    total_patches = sum(p.size(0) for p in all_patches_list)
+                    patch_init = torch.cat(all_patches_list, dim=0).detach()
+                    optimized_patch_embeds = torch.nn.Parameter(
+                        patch_init.requires_grad_(True)
+                    )
+                    # Update optimizer to include patches
+                    optimizer = torch.optim.Adam(
+                        [thought_hidden_states, optimized_patch_embeds], 
+                        lr=lr, 
+                        maximize=True
+                    )
+                    total_optimized_tokens = num_thought_tokens + total_patches
+                    if verbose >= 1:
+                        log.info(f"Initialized {total_patches} patch embeddings as optimizable parameters")
+            
+            # Build sequence using optimized patches if available, otherwise use selected patches
+            patch_idx = 0  # Index into optimized_patch_embeds
             for think_offset in range(num_thought):
                 current_thought_pos = thought_idx[0] + think_offset
                 # Add current thought token
                 embed_parts.append(inputs_embeds_step[:, current_thought_pos:current_thought_pos+1, :])
                 # Add matched visual tokens only if this position has them (at stride intervals)
                 if think_offset in all_selected_tokens:
-                    embed_parts.append(all_selected_tokens[think_offset].unsqueeze(0))
+                    num_visual = all_selected_tokens[think_offset].size(0)
+                    if optimized_patch_embeds is not None and candidate_patches is not None:
+                        # Use optimized patch embeddings
+                        patch_embeds = candidate_patches[patch_idx:patch_idx+num_visual].unsqueeze(0)
+                        embed_parts.append(patch_embeds)
+                        patch_idx += num_visual
+                    else:
+                        # Use original selected patches (first step or not optimizing)
+                        embed_parts.append(all_selected_tokens[think_offset].unsqueeze(0))
 
             # Add suffix after last thought token
             embed_parts.append(inputs_embeds_step[:, thought_idx[1]:, :])
 
             new_inputs_embeds = torch.cat(embed_parts, dim=1)
             
-            # fix: update thought_idx to include the new visual tokens
-            thought_idx = [thought_idx[0], thought_idx[0] + num_thought - 1 + sum(len(all_selected_tokens.get(i, [])) for i in range(num_thought - 1) if i % visual_insert_stride == 0 and i in all_selected_tokens)] if should_inject_visual else thought_idx
+            # Calculate the positions of all optimized tokens (thought + patches) in the new sequence
+            # They form a continuous block in the new sequence: [thought_start, thought_start + total_optimized_tokens]
+            optimized_token_positions = []
+            current_opt_pos = optimized_start_idx  # Start position in new sequence
+            
+            for think_offset in range(num_thought):
+                # Add thought token position
+                optimized_token_positions.append(current_opt_pos)
+                current_opt_pos += 1
+                # Add patch positions if any
+                if think_offset in all_selected_tokens:
+                    num_visual = all_selected_tokens[think_offset].size(0)
+                    for _ in range(num_visual):
+                        optimized_token_positions.append(current_opt_pos)
+                        current_opt_pos += 1
+            
+            # The optimized block is continuous in the new sequence
+            optimized_thought_idx = [optimized_start_idx, optimized_start_idx + total_optimized_tokens]
 
             # update attention mask to match new length
             new_attn_mask = torch.ones((1, new_inputs_embeds.size(1)), device=new_inputs_embeds.device)
@@ -692,6 +785,19 @@ def generate_vl(
             # pixel_values=inputs.get('pixel_values'),
             # image_grid_thw=inputs.get('image_grid_thw'),
         )
+        
+        # Use optimized range if patches are being optimized (continuous block)
+        if optimized_patch_embeds is not None and should_inject_visual:
+            # Build combined candidate embeddings for reward calculation
+            combined_candidate = torch.cat([candidate_latent, candidate_patches], dim=0)
+            # Use the continuous optimization range in the new sequence
+            reward_thought_idx = optimized_thought_idx
+            reward_thought_positions = None  # Use continuous range
+        else:
+            # Use original thought tokens only
+            combined_candidate = candidate_latent
+            reward_thought_idx = thought_idx
+            reward_thought_positions = None
 
         if disable_conf_reward:
             with torch.no_grad():
@@ -701,9 +807,10 @@ def generate_vl(
                 reward = get_confidence(
                     model=model,
                     inputs=inputs_step,
-                    thought_idx=thought_idx,
-                    thought_hidden_states=candidate_latent,
+                    thought_idx=reward_thought_idx,
+                    thought_hidden_states=combined_candidate,
                     k=top_k,
+                    thought_positions=reward_thought_positions,
                 )
                 reward.backward(retain_graph=True)
             else:
@@ -711,17 +818,28 @@ def generate_vl(
                     reward = get_confidence(
                         model=model,
                         inputs=inputs_step,
-                        thought_idx=thought_idx,
-                        thought_hidden_states=candidate_latent,
+                        thought_idx=reward_thought_idx,
+                        thought_hidden_states=combined_candidate,
                         k=top_k,
+                        thought_positions=reward_thought_positions,
                     )
 
         # 3.6 update latent
         if use_auto_grad:
             optimizer.step()
         else:
-            grad_ascent = lr * reward * epsilon / sigma**2
-            thought_hidden_states += grad_ascent
+            if optimized_patch_embeds is not None:
+                # Update both thought tokens and patches
+                combined_epsilon = torch.cat([
+                    epsilon[:num_thought_tokens],
+                    epsilon[num_thought_tokens:]
+                ], dim=0)
+                grad_ascent = lr * reward * combined_epsilon / sigma**2
+                thought_hidden_states += grad_ascent[:num_thought_tokens]
+                optimized_patch_embeds.data += grad_ascent[num_thought_tokens:]
+            else:
+                grad_ascent = lr * reward * epsilon / sigma**2
+                thought_hidden_states += grad_ascent
 
         sigma *= sigma_decay
 
@@ -732,6 +850,8 @@ def generate_vl(
         if is_new_best:
             best_reward, best_reward_step = reward_value, step
             best_thought_hidden_states = thought_hidden_states.clone()
+            if optimized_patch_embeds is not None:
+                best_patch_embeds = optimized_patch_embeds.clone()
             locked_patch_ids = {k: v.copy() for k, v in current_step_patch_ids.items()}
             if verbose >= 1:
                 log.info(
