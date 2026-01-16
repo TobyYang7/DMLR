@@ -192,7 +192,12 @@ def _maybe_pick_device_for_worker(args, worker_id: int):
     if dev.startswith("cuda"):
         n = torch.cuda.device_count()
         if n >= 1 and args.worker_device_round_robin:
-            return f"cuda:{worker_id % n}"
+            # When CUDA_VISIBLE_DEVICES is set, torch.cuda.device_count() returns the count
+            # of visible devices, and we should use cuda:0, cuda:1, etc. which map to
+            # the actual visible devices
+            device_id = worker_id % n
+            return f"cuda:{device_id}"
+        # If device is "cuda" without number, use cuda:0 (which maps to first visible device)
         return dev if ":" in dev else ("cuda:0" if n >= 1 else "cpu")
     return dev if dev else ("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -231,12 +236,16 @@ def _load_model_with_retry(model_name_or_path, model_kwargs, device, max_retries
             # Set environment variable to ensure eager mode
             os.environ['TORCH_COMPILE_DISABLE'] = '1'
             
+            # Explicitly set device before loading to ensure model loads on correct GPU
+            if device.type == "cuda":
+                torch.cuda.set_device(device)
             model = AutoModelForVision2Seq.from_pretrained(
                 model_name_or_path,
                 **model_kwargs,
                 trust_remote_code=True,
                 attn_implementation="eager",
             )
+            # Ensure model is moved to the specified device
             model.to(device)
             model.eval()
             # Ensure model uses eager backend (disable any compilation)
@@ -303,9 +312,12 @@ def _worker_run(wargs, worker_id: int, result_queue: mp.Queue):
         # if wargs.seed:
         #     set_seed(int(wargs.seed) + worker_id)  # decorrelate a bit
 
-        # device
-        device_str = wargs.device if wargs.device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+        # device - ensure we use the device assigned by parent process
+        device_str = wargs.device if wargs.device is not None else ("cuda:0" if torch.cuda.is_available() else "cpu")
         device = torch.device(device_str)
+        # Explicitly set the current device to ensure all operations use the correct GPU
+        if device.type == "cuda":
+            torch.cuda.set_device(device)
 
         # verify-only: we keep single-process in main. Workers shouldn't be spawned for verify-only.
         if wargs.verify_only:
@@ -564,10 +576,13 @@ def main(args):
 
     # set device
     if args.device is None:
-        device_str = "cuda" if torch.cuda.is_available() else "cpu"
+        device_str = "cuda:0" if torch.cuda.is_available() else "cpu"
     else:
         device_str = args.device
     device = torch.device(device_str)
+    # Explicitly set the current device to ensure all operations use the correct GPU
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
 
     # verify-only: re-open existing results.json, re-judge correctness, overwrite, and exit
     if args.verify_only:

@@ -1,4 +1,5 @@
 torch
+torchvision
 transformers
 numpy
 datasets
@@ -10,4 +11,5 @@ termcolor
 colorama
 qwen-vl-utils
 accelerate
-
+termcolor
+qwen-vl-utils

@@ -2,17 +2,17 @@
 set -euo pipefail
 
 export HF_HOME=.cache
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=2,3
 
 NUM_WORKERS=2
 DATA_POINT=4
-DATASET=scienceqa
+DATASET=mmstar
 DATASET_FILE=data/${DATASET}.json
-OUTPUT_DIR=./output_vis/v8/${DATASET}/${DATA_POINT}/qwen_initpatch_passk
+OUTPUT_DIR=./output
 
-MODEL_NAME=Qwen/Qwen2.5-VL-7B-Instruct
+MODEL_NAME=Qwen/Qwen2.5-VL-3B-Instruct
 
-uv run python main.py \
+python main.py \
     --dataset $DATASET_FILE \
     --model_name_or_path $MODEL_NAME \
     --output_dir $OUTPUT_DIR \

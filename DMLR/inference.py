@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
-from reward import RewardModel
-from logger import log
+from .reward import RewardModel
+from .logger import log
 from typing import Dict, Union, Optional, Tuple, List
 from pathlib import Path
 import numpy as np
 import os
 import csv
 from PIL import Image
-from prompts import SYSTEM_PROMPT
+from .prompts import SYSTEM_PROMPT
 try:
     from colorama import Fore, Style
     init_colorama = True
@@ -667,6 +667,9 @@ def generate_vl(
             embed_parts.append(inputs_embeds_step[:, thought_idx[1]:, :])
 
             new_inputs_embeds = torch.cat(embed_parts, dim=1)
+            
+            # fix: update thought_idx to include the new visual tokens
+            thought_idx = [thought_idx[0], thought_idx[0] + num_thought - 1 + sum(len(all_selected_tokens.get(i, [])) for i in range(num_thought - 1) if i % visual_insert_stride == 0 and i in all_selected_tokens)] if should_inject_visual else thought_idx
 
             # update attention mask to match new length
             new_attn_mask = torch.ones((1, new_inputs_embeds.size(1)), device=new_inputs_embeds.device)

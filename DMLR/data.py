@@ -7,7 +7,7 @@ import os
 import json
 import logging
 from multiprocessing import Pool, cpu_count
-from prompts import vl_cot_prompt
+from .prompts import vl_cot_prompt
 
 
 def process_single_item(item, index):

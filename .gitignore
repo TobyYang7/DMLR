@@ -1,0 +1,11 @@
+.cache/
+.DS_Store
+.vscode/
+.idea/
+.pytest_cache/
+.pytest_cache/
+*.pt
+dataset/
+data/**.py
+__pycache__/
+output/
